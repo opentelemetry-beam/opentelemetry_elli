@@ -7,7 +7,7 @@ Elli middleware for OpenCensus instrumentation.
 ## Setup and Configuration
 
 ``` erlang
-{deps, [opencensus_elli]}.
+{deps, [opentelemetry_elli]}.
 ```
 
 Using the elli_middleware callback place oc_elli_middelware as the first module to be called in the list of handlers:
