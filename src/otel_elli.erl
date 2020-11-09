@@ -2,7 +2,7 @@
 
 -export([start_span/2]).
 
--include_lib("opentelemetry_api/include/tracer.hrl").
+-include_lib("opentelemetry_api/include/otel_tracer.hrl").
 -include_lib("opentelemetry_api/include/opentelemetry.hrl").
 -include_lib("elli/include/elli.hrl").
 
@@ -22,19 +22,22 @@ start_span(SpanName, Req) ->
     {HostIp, HostPort} = host_ip_and_port(Req),
     {ok, HostName} = inet:gethostname(),
 
-    ?start_span(SpanName, #{kind => ?SPAN_KIND_SERVER,
-                            attributes => [{<<"http.target">>, RawPath},
-                                           {<<"http.host">>,  Host},
-                                           %% {<<"http.scheme">>,  Scheme},
-                                           {<<"http.user_agent">>, UserAgent},
-                                           {<<"http.method">>, BinMethod},
-                                           {<<"net.peer.ip">>, PeerIp},
-                                           {<<"net.peer.port">>, PeerPort},
-                                           {<<"net.peer.name">>, Host},
-                                           {<<"net.transport">>, <<"IP.TCP">>},
-                                           {<<"net.host.ip">>, HostIp},
-                                           {<<"net.host.port">>, HostPort},
-                                           {<<"net.host.name">>, HostName} | optional_attributes(Req)]}),
+    SpanCtx = ?start_span(SpanName, #{kind => ?SPAN_KIND_SERVER,
+                                      attributes => [{<<"http.target">>, RawPath},
+                                                     {<<"http.host">>,  Host},
+                                                     %% {<<"http.scheme">>,  Scheme},
+                                                     {<<"http.user_agent">>, UserAgent},
+                                                     {<<"http.method">>, BinMethod},
+                                                     {<<"net.peer.ip">>, PeerIp},
+                                                     {<<"net.peer.port">>, PeerPort},
+                                                     {<<"net.peer.name">>, Host},
+                                                     {<<"net.transport">>, <<"IP.TCP">>},
+                                                     {<<"net.host.ip">>, HostIp},
+                                                     {<<"net.host.port">>, HostPort},
+                                                     {<<"net.host.name">>, HostName}
+                                                    | optional_attributes(Req)]}),
+
+    ?set_current_span(SpanCtx),
     ok.
 
 to_binary(Method) when is_atom(Method) ->

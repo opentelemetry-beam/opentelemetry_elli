@@ -19,7 +19,7 @@
 
 -include_lib("elli/include/elli.hrl").
 -include_lib("opentelemetry_api/include/opentelemetry.hrl").
--include_lib("opentelemetry_api/include/tracer.hrl").
+-include_lib("opentelemetry_api/include/otel_tracer.hrl").
 
 -export([preprocess/2,
          handle/2,
@@ -29,7 +29,7 @@ preprocess(Req=#req{headers=Headers}, _) ->
     %% extract trace context from headers to be used as the parent
     %% of a span if started by the user's elli handler
     Headers = elli_request:headers(Req),
-    ot_propagation:http_extract(Headers),
+    otel_propagator:text_map_extract(Headers),
 
     %% TODO: consider starting span here and relying on `update_name'
 
@@ -39,6 +39,13 @@ handle(_Req, _Config) ->
     ignore.
 
 handle_event(elli_startup, _Args, _Config) ->
+    _ExcludeUrls = case os:getenv("OTEL_ERLANG_ELLI_EXCLUDED_URLS") of
+                      false ->
+                          [];
+                      E ->
+                          E
+                  end,
+
     {ok, Vsn} = application:get_key(opentelemetry_elli, vsn),
     _ = opentelemetry:register_tracer(opentelemetry_elli, Vsn),
 
@@ -119,28 +126,7 @@ finish_exception(Exception, Stacktrace) ->
 term_to_string(Term) ->
     list_to_binary(io_lib:format("~p", [Term])).
 
-http_to_otel_status(Code) when Code >= 100 , Code =< 299 ->
-    ?OTEL_STATUS_OK;
-http_to_otel_status(Code) when Code >= 300 , Code =< 399 ->
-    %% TODO: supposed to be ?OTEL_STATUS_DEADLINE_EXCEEDED if this is a loop
-    ?OTEL_STATUS_OK;
-http_to_otel_status(401) ->
-    ?OTEL_STATUS_UNAUTHENTICATED;
-http_to_otel_status(403) ->
-    ?OTEL_STATUS_PERMISSION_DENIED;
-http_to_otel_status(404) ->
-    ?OTEL_STATUS_NOT_FOUND;
-http_to_otel_status(429) ->
-    ?OTEL_STATUS_RESOURCE_EXHAUSTED;
-http_to_otel_status(Code) when Code >= 400 , Code =< 499 ->
-    ?OTEL_STATUS_INVALID_ARGUMENT;
-http_to_otel_status(501) ->
-    ?OTEL_STATUS_UNIMPLEMENTED;
-http_to_otel_status(503) ->
-    ?OTEL_STATUS_UNAVAILABLE;
-http_to_otel_status(504) ->
-    ?OTEL_STATUS_DEADLINE_EXCEEDED;
-http_to_otel_status(Code) when Code >= 500 , Code =< 599 ->
-    ?OTEL_STATUS_INTERNAL;
+http_to_otel_status(Code) when Code >= 100 , Code =< 399 ->
+    ?OTEL_STATUS_UNSET;
 http_to_otel_status(_) ->
-    ?OTEL_STATUS_UNKNOWN.
+    ?OTEL_STATUS_ERROR.
