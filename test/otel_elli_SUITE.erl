@@ -65,12 +65,14 @@ end_per_testcase(_, _Config) ->
     ok.
 
 successful_request(_Config) ->
+    application:ensure_all_started(hackney),
     ?with_span(<<"remote-parent">>, #{},
                fun(_) ->
                        RequestHeaders = [{binary_to_list(K), binary_to_list(V)}
                                          || {K, V} <- otel_propagator:text_map_inject([])],
                        {ok, {{_, 200, _}, _Headers, Body}} =
-                           httpc:request(get, {"http://localhost:3000/hello/otel", RequestHeaders},
+                           httpc:request(get, {"http://localhost:3000/hello/otel?a=b#fragment",
+                                               RequestHeaders},
                                          [], []),
                        ?assertEqual("Hello otel", Body)
                end),
@@ -82,12 +84,13 @@ successful_request(_Config) ->
                      events=_TimeEvents}} when Parent =/= undefined ->
             ?assertEqual(<<"/hello/{who}">>, Name),
             ?assertMatch(#{<<"http.server_name">> := <<"my-test-elli-server">>,
-                           <<"http.target">> := <<"/hello/otel">>,
+                           <<"http.target">> := <<"/hello/otel?a=b">>,
                            <<"http.host">> := <<"localhost:3000">>,
+                           %% <<"http.url">> := <<"http://localhost:3000/hello/otel?a=b#fragment">>,
                            %% scheme is removed until fixed in elli
                            %% <<"http.scheme">> := <<"http">>,
                            <<"http.status">> := 200,
-                           <<"http.user_agent">> := <<>>,
+                           %% <<"http.user_agent">> := <<>>,
                            <<"http.method">> := <<"GET">>,
                            <<"net.host.port">> := 3000}, maps:from_list(Attributes)),
 
@@ -109,7 +112,7 @@ successful_request(_Config) ->
     ok.
 
 successful_request_no_parent(_Config) ->
-    {ok, {{_, 200, _}, _Headers, Body}} = httpc:request("http://localhost:3000/hello/otel"),
+    {ok, {{_, 200, _}, _Headers, Body}} = httpc:request("http://localhost:3000/hello/otel?a=b#fragment"),
     ?assertEqual("Hello otel", Body),
 
     receive
@@ -119,7 +122,7 @@ successful_request_no_parent(_Config) ->
                      events=_TimeEvents}} when Parent =:= undefined ->
             ?assertEqual(<<"/hello/{who}">>, Name),
             ?assertMatch(#{<<"http.server_name">> := <<"my-test-elli-server">>,
-                           <<"http.target">> := <<"/hello/otel">>,
+                           <<"http.target">> := <<"/hello/otel?a=b">>,
                            <<"http.host">> := <<"localhost:3000">>,
                            %% scheme is removed until fixed in elli
                            %% <<"http.scheme">> := <<"http">>,
@@ -134,7 +137,7 @@ successful_request_no_parent(_Config) ->
     ok.
 
 error_response(_Config) ->
-    {ok, {{_, 500, _}, _Headers, _Body}} = httpc:request("http://localhost:3000/error"),
+    {ok, {{_, 500, _}, _Headers, _Body}} = httpc:request("http://localhost:3000/error?a=b#fragment"),
 
     receive
         {span, #span{name=Name,
@@ -142,7 +145,7 @@ error_response(_Config) ->
                      attributes=Attributes}} when Parent =:= undefined ->
             ?assertEqual(<<"/error">>, Name),
             ?assertMatch(#{<<"http.server_name">> := <<"my-test-elli-server">>,
-                           <<"http.target">> := <<"/error">>,
+                           <<"http.target">> := <<"/error?a=b">>,
                            <<"http.host">> := <<"localhost:3000">>,
                            <<"http.status">> := 500,
                            <<"http.user_agent">> := <<>>,

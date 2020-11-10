@@ -39,6 +39,7 @@ handle(_Req, _Config) ->
     ignore.
 
 handle_event(elli_startup, _Args, _Config) ->
+    %% support a app var and os var for setting URLs to not trace
     _ExcludeUrls = case os:getenv("OTEL_ERLANG_ELLI_EXCLUDED_URLS") of
                       false ->
                           [];
@@ -99,6 +100,10 @@ handle_full_response(_Type, [_Req, Code, _Hs, _B, {_Timings, _Sizes}], _Config) 
     Status = opentelemetry:status(http_to_otel_status(Code), <<>>),
     ?set_status(Status),
     ?set_attribute(<<"http.status">>, Code),
+
+    %% TODO attributes:
+    %% http.response_content_length
+    %% http.response_content_length_uncompressed
 
     %% end the span that the user might have started
     %% if there is no started span this is a noop
