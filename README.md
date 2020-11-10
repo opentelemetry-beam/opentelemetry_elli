@@ -2,7 +2,7 @@
 
 ![Common Test](https://github.com/opentelemetry-beam/opentelemetry_elli/workflows/Common%20Test/badge.svg) [![Gitter](https://badges.gitter.im/open-telemetry/opentelemetry-erlang.svg)](https://gitter.im/open-telemetry/opentelemetry-erlang?utm_source=badge&utm_medium=badge&utm_campaign=pr-badge)
 
-Elli middleware for OpenCensus instrumentation.
+Elli middleware for OpenTelemetry instrumentation.
 
 ## Setup and Configuration
 
