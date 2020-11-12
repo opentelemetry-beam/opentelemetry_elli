@@ -12,14 +12,17 @@ all() ->
     [{group, w3c}, {group, b3}].
 
 groups() ->
-    [{w3c, [shuffle], [successful_request_no_parent, successful_request, error_response]},
-     {b3, [shuffle], [successful_request_no_parent, successful_request, error_response]}].
+    [{w3c, [shuffle], [successful_request_no_parent, successful_request,
+                       error_response, excluded_urls]},
+     {b3, [shuffle], [successful_request_no_parent, successful_request,
+                      error_response, excluded_urls]}].
 
 
 init_per_suite(Config) ->
     ok = application:load(opentelemetry_elli),
     ok = application:load(opentelemetry),
 
+    application:set_env(opentelemetry_elli, excluded_urls, ["/hello/exclude"]),
     application:set_env(opentelemetry_elli, server_name, <<"my-test-elli-server">>),
 
     Config.
@@ -64,8 +67,50 @@ end_per_testcase(_, _Config) ->
     _ = application:stop(opentelemetry),
     ok.
 
+excluded_urls(_Config) ->
+    ?with_span(<<"remote-parent">>, #{},
+               fun(_) ->
+                       RequestHeaders = [{binary_to_list(K), binary_to_list(V)}
+                                         || {K, V} <- otel_propagator:text_map_inject([])],
+                       {ok, {{_, 200, _}, _Headers, Body}} =
+                           httpc:request(get, {"http://localhost:3000/hello/exclude",
+                                               RequestHeaders},
+                                         [], []),
+                       ?assertEqual("Hello exclude", Body)
+               end),
+
+    receive
+        {span, #span{name=Name,
+                     parent_span_id=Parent}} when Parent =/= undefined ->
+            ?assertEqual(<<"handler-child">>, Name),
+
+            %% then receive the remote parent
+            receive
+                {span, #span{name=ParentName,
+                             span_id=ParentSpanId,
+                             parent_span_id=undefined}} when ParentSpanId =:= Parent ->
+                    ?assertEqual(<<"remote-parent">>, ParentName),
+
+                    %% and guarantee that the mailbox is empty, meaning no elli_middleware span
+                    receive
+                        _ ->
+                            ct:fail(mailbox_not_empty)
+                    after
+                        0 ->
+                            ok
+                    end
+            after
+                5000 ->
+                    ct:fail(timeout)
+            end
+    after
+        5000 ->
+            ct:fail(timeout)
+    end,
+
+    ok.
+
 successful_request(_Config) ->
-    application:ensure_all_started(hackney),
     ?with_span(<<"remote-parent">>, #{},
                fun(_) ->
                        RequestHeaders = [{binary_to_list(K), binary_to_list(V)}
@@ -78,15 +123,15 @@ successful_request(_Config) ->
                end),
 
     receive
-        {span, #span{name=Name,
+        {span, #span{name = <<"/hello/{who}">>,
                      parent_span_id=Parent,
                      attributes=Attributes,
                      events=_TimeEvents}} when Parent =/= undefined ->
-            ?assertEqual(<<"/hello/{who}">>, Name),
             ?assertMatch(#{<<"http.server_name">> := <<"my-test-elli-server">>,
                            <<"http.target">> := <<"/hello/otel?a=b">>,
                            <<"http.host">> := <<"localhost:3000">>,
-                           %% <<"http.url">> := <<"http://localhost:3000/hello/otel?a=b#fragment">>,
+                           %% removed until updates to elli allow it
+                           %% <<"http.url">> := <<"http://localhost:3000/hello/otel?a=b">>,
                            %% scheme is removed until fixed in elli
                            %% <<"http.scheme">> := <<"http">>,
                            <<"http.status">> := 200,
@@ -102,11 +147,11 @@ successful_request(_Config) ->
                     ?assertEqual(<<"remote-parent">>, ParentName)
             after
                 5000 ->
-                    error(timeout)
+                    ct:fail(timeout)
             end
     after
         5000 ->
-            error(timeout)
+            ct:fail(timeout)
     end,
 
     ok.
@@ -116,11 +161,10 @@ successful_request_no_parent(_Config) ->
     ?assertEqual("Hello otel", Body),
 
     receive
-        {span, #span{name=Name,
+        {span, #span{name = <<"/hello/{who}">>,
                      parent_span_id=Parent,
                      attributes=Attributes,
                      events=_TimeEvents}} when Parent =:= undefined ->
-            ?assertEqual(<<"/hello/{who}">>, Name),
             ?assertMatch(#{<<"http.server_name">> := <<"my-test-elli-server">>,
                            <<"http.target">> := <<"/hello/otel?a=b">>,
                            <<"http.host">> := <<"localhost:3000">>,
@@ -143,7 +187,7 @@ error_response(_Config) ->
         {span, #span{name=Name,
                      parent_span_id=Parent,
                      attributes=Attributes}} when Parent =:= undefined ->
-            ?assertEqual(<<"/error">>, Name),
+            ?assertEqual(<<"HTTP GET">>, Name),
             ?assertMatch(#{<<"http.server_name">> := <<"my-test-elli-server">>,
                            <<"http.target">> := <<"/error?a=b">>,
                            <<"http.host">> := <<"localhost:3000">>,
@@ -153,7 +197,7 @@ error_response(_Config) ->
                            <<"http.method">> := <<"GET">>}, maps:from_list(Attributes))
     after
         5000 ->
-            error(timeout)
+            ct:fail(timeout)
     end,
     ok.
 %%
@@ -161,11 +205,16 @@ error_response(_Config) ->
 handle(Req, Args) ->
     handle(Req#req.path, Req, Args).
 
-handle([<<"hello">>, Who], Req, _Args) ->
-    otel_elli:start_span(<<"/hello/{who}">>, Req),
+handle([<<"hello">>, Who], _Req, _Args) ->
+    ?update_name(<<"/hello/{who}">>),
+
+    ?with_span(<<"handler-child">>, #{},
+               fun(_) ->
+                       ok
+               end),
+
     {ok, [], <<"Hello ", Who/binary>>};
-handle([<<"error">>], Req, _Args) ->
-    otel_elli:start_span(<<"/error">>, Req),
+handle([<<"error">>], _Req, _Args) ->
     throw(all_hell).
 
 handle_event(_Event, _Data, _Args) ->

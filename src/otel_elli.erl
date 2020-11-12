@@ -1,12 +1,12 @@
 -module(otel_elli).
 
--export([start_span/2]).
+-export([start_span/1]).
 
 -include_lib("opentelemetry_api/include/otel_tracer.hrl").
 -include_lib("opentelemetry_api/include/opentelemetry.hrl").
 -include_lib("elli/include/elli.hrl").
 
-start_span(SpanName, Req) ->
+start_span(Req) ->
     Method = elli_request:method(Req),
     RawPath = elli_request:raw_path(Req),
 
@@ -14,6 +14,7 @@ start_span(SpanName, Req) ->
     %% Scheme = elli_request:scheme(Req),
 
     BinMethod = to_binary(Method),
+    SpanName = <<"HTTP ", BinMethod/binary>>,
     UserAgent = elli_request:get_header(<<"User-Agent">>, Req, <<>>),
     %% Host = elli_request:get_header(<<"Host">>, Req, <<>>),
     Host = case elli_request:host(Req) of

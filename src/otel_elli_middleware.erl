@@ -17,40 +17,40 @@
 %%%-------------------------------------------------------------------------
 -module(otel_elli_middleware).
 
--include_lib("elli/include/elli.hrl").
--include_lib("opentelemetry_api/include/opentelemetry.hrl").
--include_lib("opentelemetry_api/include/otel_tracer.hrl").
-
 -export([preprocess/2,
          handle/2,
          handle_event/3]).
 
-preprocess(Req=#req{headers=Headers}, _) ->
+-include_lib("elli/include/elli.hrl").
+-include_lib("opentelemetry_api/include/opentelemetry.hrl").
+-include_lib("opentelemetry_api/include/otel_tracer.hrl").
+
+-define(EXCLUDED_URLS, {?MODULE, excluded_urls}).
+
+preprocess(Req, _) ->
     %% extract trace context from headers to be used as the parent
-    %% of a span if started by the user's elli handler
     Headers = elli_request:headers(Req),
     otel_propagator:text_map_extract(Headers),
-
-    %% TODO: consider starting span here and relying on `update_name'
-
-    Req.
+    case lists:member(elli_request:raw_path(Req), persistent_term:get(?EXCLUDED_URLS, [])) of
+        true ->
+            Req;
+        false ->
+            otel_elli:start_span(Req),
+            Req
+    end.
 
 handle(_Req, _Config) ->
     ignore.
 
 handle_event(elli_startup, _Args, _Config) ->
-    %% support a app var and os var for setting URLs to not trace
-    _ExcludeUrls = case os:getenv("OTEL_ERLANG_ELLI_EXCLUDED_URLS") of
-                      false ->
-                          [];
-                      E ->
-                          E
-                  end,
+    ExcludedUrls = collect_excluded_urls(),
+
+    persistent_term:put(?EXCLUDED_URLS, ExcludedUrls),
 
     {ok, Vsn} = application:get_key(opentelemetry_elli, vsn),
     _ = opentelemetry:register_tracer(opentelemetry_elli, Vsn),
 
-    %% TODO: create instruments here
+    %% TODO: create instruments here for recording metrics
     ok;
 handle_event(request_complete, Args, Config) ->
     handle_full_response(request_complete, Args, Config);
@@ -135,3 +135,22 @@ http_to_otel_status(Code) when Code >= 100 , Code =< 399 ->
     ?OTEL_STATUS_UNSET;
 http_to_otel_status(_) ->
     ?OTEL_STATUS_ERROR.
+
+to_binary(S) when is_list(S) ->
+    list_to_binary(S);
+to_binary(S) when is_binary(S) ->
+    S.
+
+collect_excluded_urls() ->
+    %% support a app var and os var for setting URLs to not trace
+    OSExcludeUrls = case os:getenv("OTEL_ERLANG_ELLI_EXCLUDED_URLS") of
+                        false ->
+                            [];
+                        E ->
+                            string:split(E, ",", all)
+                    end,
+
+    AppExcludedUrls = application:get_env(opentelemetry_elli, excluded_urls, []),
+
+    lists:umerge([to_binary(S) || S <- lists:usort(AppExcludedUrls)],
+                 [to_binary(S) || S <- lists:usort(OSExcludeUrls)]).
