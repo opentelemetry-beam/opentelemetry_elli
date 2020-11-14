@@ -176,7 +176,7 @@ successful_request_no_parent(_Config) ->
                            <<"net.host.port">> := 3000}, maps:from_list(Attributes))
     after
         5000 ->
-            error(timeout)
+            ct:fail(timeout)
     end,
     ok.
 
