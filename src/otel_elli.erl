@@ -1,12 +1,12 @@
 -module(otel_elli).
 
--export([start_span/2]).
+-export([start_span/1]).
 
--include_lib("opentelemetry_api/include/tracer.hrl").
+-include_lib("opentelemetry_api/include/otel_tracer.hrl").
 -include_lib("opentelemetry_api/include/opentelemetry.hrl").
 -include_lib("elli/include/elli.hrl").
 
-start_span(SpanName, Req) ->
+start_span(Req) ->
     Method = elli_request:method(Req),
     RawPath = elli_request:raw_path(Req),
 
@@ -14,28 +14,54 @@ start_span(SpanName, Req) ->
     %% Scheme = elli_request:scheme(Req),
 
     BinMethod = to_binary(Method),
+    SpanName = <<"HTTP ", BinMethod/binary>>,
     UserAgent = elli_request:get_header(<<"User-Agent">>, Req, <<>>),
-    Host = elli_request:get_header(<<"Host">>, Req, <<>>),
-
+    %% Host = elli_request:get_header(<<"Host">>, Req, <<>>),
+    Host = case elli_request:host(Req) of
+               undefined ->
+                   elli_request:get_header(<<"Host">>, Req, <<>>);
+               H ->
+                   H
+           end,
     %% TODO: attribute `http.route' should be an option to this function
     {PeerIp, PeerPort} = peer_ip_and_port(Req),
     {HostIp, HostPort} = host_ip_and_port(Req),
     {ok, HostName} = inet:gethostname(),
 
-    ?start_span(SpanName, #{kind => ?SPAN_KIND_SERVER,
-                            attributes => [{<<"http.target">>, RawPath},
-                                           {<<"http.host">>,  Host},
-                                           %% {<<"http.scheme">>,  Scheme},
-                                           {<<"http.user_agent">>, UserAgent},
-                                           {<<"http.method">>, BinMethod},
-                                           {<<"net.peer.ip">>, PeerIp},
-                                           {<<"net.peer.port">>, PeerPort},
-                                           {<<"net.peer.name">>, Host},
-                                           {<<"net.transport">>, <<"IP.TCP">>},
-                                           {<<"net.host.ip">>, HostIp},
-                                           {<<"net.host.port">>, HostPort},
-                                           {<<"net.host.name">>, HostName} | optional_attributes(Req)]}),
+    %% TODO: update elli to keep the whole url
+    %% Url = elli_request:url(Req),
+
+    Flavor = flavor(Req),
+
+    SpanCtx = ?start_span(SpanName, #{kind => ?SPAN_KIND_SERVER,
+                                      attributes => [{<<"http.target">>, RawPath},
+                                                     {<<"http.host">>,  Host},
+                                                     %% {<<"http.url">>, Url},
+                                                     %% {<<"http.scheme">>,  Scheme},
+                                                     {<<"http.flavor">>, Flavor},
+                                                     {<<"http.user_agent">>, UserAgent},
+                                                     {<<"http.method">>, BinMethod},
+                                                     {<<"net.peer.ip">>, PeerIp},
+                                                     {<<"net.peer.port">>, PeerPort},
+                                                     {<<"net.peer.name">>, Host},
+                                                     {<<"net.transport">>, <<"IP.TCP">>},
+                                                     {<<"net.host.ip">>, HostIp},
+                                                     {<<"net.host.port">>, HostPort},
+                                                     {<<"net.host.name">>, HostName}
+                                                    | optional_attributes(Req)]}),
+    %% TODO:
+    %% http.request_content_length
+    %% http.request_content_length_uncompressed
+
+    ?set_current_span(SpanCtx),
     ok.
+
+flavor(#req{version={1,1}}) ->
+    <<"1.1">>;
+flavor(#req{version={1,0}}) ->
+    <<"1.0">>;
+flavor(_) ->
+    <<>>.
 
 to_binary(Method) when is_atom(Method) ->
     atom_to_binary(Method, utf8);

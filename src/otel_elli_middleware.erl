@@ -17,32 +17,40 @@
 %%%-------------------------------------------------------------------------
 -module(otel_elli_middleware).
 
--include_lib("elli/include/elli.hrl").
--include_lib("opentelemetry_api/include/opentelemetry.hrl").
--include_lib("opentelemetry_api/include/tracer.hrl").
-
 -export([preprocess/2,
          handle/2,
          handle_event/3]).
 
-preprocess(Req=#req{headers=Headers}, _) ->
+-include_lib("elli/include/elli.hrl").
+-include_lib("opentelemetry_api/include/opentelemetry.hrl").
+-include_lib("opentelemetry_api/include/otel_tracer.hrl").
+
+-define(EXCLUDED_URLS, {?MODULE, excluded_urls}).
+
+preprocess(Req, _) ->
     %% extract trace context from headers to be used as the parent
-    %% of a span if started by the user's elli handler
     Headers = elli_request:headers(Req),
-    ot_propagation:http_extract(Headers),
-
-    %% TODO: consider starting span here and relying on `update_name'
-
-    Req.
+    otel_propagator:text_map_extract(Headers),
+    case lists:member(elli_request:raw_path(Req), persistent_term:get(?EXCLUDED_URLS, [])) of
+        true ->
+            Req;
+        false ->
+            otel_elli:start_span(Req),
+            Req
+    end.
 
 handle(_Req, _Config) ->
     ignore.
 
 handle_event(elli_startup, _Args, _Config) ->
+    ExcludedUrls = collect_excluded_urls(),
+
+    persistent_term:put(?EXCLUDED_URLS, ExcludedUrls),
+
     {ok, Vsn} = application:get_key(opentelemetry_elli, vsn),
     _ = opentelemetry:register_tracer(opentelemetry_elli, Vsn),
 
-    %% TODO: create instruments here
+    %% TODO: create instruments here for recording metrics
     ok;
 handle_event(request_complete, Args, Config) ->
     handle_full_response(request_complete, Args, Config);
@@ -93,6 +101,10 @@ handle_full_response(_Type, [_Req, Code, _Hs, _B, {_Timings, _Sizes}], _Config) 
     ?set_status(Status),
     ?set_attribute(<<"http.status">>, Code),
 
+    %% TODO attributes:
+    %% http.response_content_length
+    %% http.response_content_length_uncompressed
+
     %% end the span that the user might have started
     %% if there is no started span this is a noop
     ?end_span(),
@@ -119,28 +131,26 @@ finish_exception(Exception, Stacktrace) ->
 term_to_string(Term) ->
     list_to_binary(io_lib:format("~p", [Term])).
 
-http_to_otel_status(Code) when Code >= 100 , Code =< 299 ->
-    ?OTEL_STATUS_OK;
-http_to_otel_status(Code) when Code >= 300 , Code =< 399 ->
-    %% TODO: supposed to be ?OTEL_STATUS_DEADLINE_EXCEEDED if this is a loop
-    ?OTEL_STATUS_OK;
-http_to_otel_status(401) ->
-    ?OTEL_STATUS_UNAUTHENTICATED;
-http_to_otel_status(403) ->
-    ?OTEL_STATUS_PERMISSION_DENIED;
-http_to_otel_status(404) ->
-    ?OTEL_STATUS_NOT_FOUND;
-http_to_otel_status(429) ->
-    ?OTEL_STATUS_RESOURCE_EXHAUSTED;
-http_to_otel_status(Code) when Code >= 400 , Code =< 499 ->
-    ?OTEL_STATUS_INVALID_ARGUMENT;
-http_to_otel_status(501) ->
-    ?OTEL_STATUS_UNIMPLEMENTED;
-http_to_otel_status(503) ->
-    ?OTEL_STATUS_UNAVAILABLE;
-http_to_otel_status(504) ->
-    ?OTEL_STATUS_DEADLINE_EXCEEDED;
-http_to_otel_status(Code) when Code >= 500 , Code =< 599 ->
-    ?OTEL_STATUS_INTERNAL;
+http_to_otel_status(Code) when Code >= 100 , Code =< 399 ->
+    ?OTEL_STATUS_UNSET;
 http_to_otel_status(_) ->
-    ?OTEL_STATUS_UNKNOWN.
+    ?OTEL_STATUS_ERROR.
+
+to_binary(S) when is_list(S) ->
+    list_to_binary(S);
+to_binary(S) when is_binary(S) ->
+    S.
+
+collect_excluded_urls() ->
+    %% support a app var and os var for setting URLs to not trace
+    OSExcludeUrls = case os:getenv("OTEL_ERLANG_ELLI_EXCLUDED_URLS") of
+                        false ->
+                            [];
+                        E ->
+                            string:split(E, ",", all)
+                    end,
+
+    AppExcludedUrls = application:get_env(opentelemetry_elli, excluded_urls, []),
+
+    lists:umerge([to_binary(S) || S <- lists:usort(AppExcludedUrls)],
+                 [to_binary(S) || S <- lists:usort(OSExcludeUrls)]).

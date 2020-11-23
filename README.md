@@ -32,22 +32,55 @@ It is strongly recommended to set this environment variable so the attribute can
 
 ## Use
 
-Because Elli has no router it is not possible to set the name of the Span in the middleware. See the OpenTelemetry docs [Semantic conventions for HTTP spans](https://github.com/open-telemetry/opentelemetry-specification/blob/master/specification/data-http.md#name) for why you don't want to set the Span name to the raw path of the request. Thus, the child Span for a request is not started in the middleware but must be done in the Elli handler's `handle` function. However, ending the Span is handled by the middleware. It won't break anything if you end the Span outside of the middleware, but it will mean the Span won't have attributes like `http.status` that are only available when the response is ready to send.
+### Including the Middleware and setting Span names
 
-A function `otel_elli:start_span/2` is provided to handle setting all the HTTP related attributes for the span:
+The middleware takes care of extracting the parent Span from the requests
+headers, both the [W3C](https://w3c.github.io/trace-context/) and [B3](https://github.com/openzipkin/b3-propagation) formats are supported.
+
+Because Elli has no router there is not a way to get a very descriptive Span
+name automatically. See the OpenTelemetry docs [Semantic conventions for HTTP spans](https://github.com/open-telemetry/opentelemetry-specification/blob/master/specification/data-http.md#name) for
+why you don't want to set the Span name to the raw path of the request. Thus,
+the Span has the name `"HTTP {METHOD_NAME}"`.
+
+The macro `update_name` from `opentelemetry_api/include/otel_tracer.hrl` allows you
+to update the name of the Span after it has started:
 
 ``` erlang
 handle(Req, Args) ->
     handle(Req#req.path, Req, Args).
 
 handle([<<"hello">>, Who], Req, _Args) ->
-    otel_elli:start_span(<<"/hello/{who}">>, Req),
+    ?update_name(<<"/hello/{who}">>),
     {ok, [], <<"Hello ", Who/binary>>}.
 ```
 
-The middleware takes care of extracting the parent Span from the requests headers, both the [W3C](https://w3c.github.io/trace-context/) and [B3](https://github.com/openzipkin/b3-propagation) formats are supported, and that parent will be automatically used when the Span is started.
+Attributes set by the middleware can be found in the OpenTelemetry docs [Semantic
+conventions for HTTP spans](https://github.com/open-telemetry/opentelemetry-specification/blob/master/specification/data-http.md).
 
-Other attributes set by the middleware can be found in the OpenTelemetry docs [Semantic conventions for HTTP spans](https://github.com/open-telemetry/opentelemetry-specification/blob/master/specification/data-http.md).
+Note that it isn't required to update the Span name, that is just a suggestion
+for when it makes sense to do so. And another option is to create a child Span
+with this better name and its parent will be the Span named `"HTTP
+{METHOD_NAME}"`.
+
+### Excluding Paths
+
+Not all paths are created equal. It is likely you don't want to Trace a health
+check endpoint or `/metrics` if using Prometheus to scrape metrics. So this
+library offers two ways to exclude requests from potentially creating Spans by
+filtering on the raw path in the URL.
+
+A Application environment variable is read in on Elli start, so the follow can
+be added to `sys.config` to exclude the url `/exclude/me`:
+
+``` erlang
+
+{opentelemetry_elli, [{excluded_urls, ["/health", "/metrics"]}]}
+```
+
+An OS environment variable, `OTEL_ERLANG_ELLI_EXCLUDED_URLS`, is also read and is
+a comma separated list of paths.
+
+The lists from both are merged.
 
 ## Testing
 

@@ -4,22 +4,25 @@
 
 -include_lib("eunit/include/eunit.hrl").
 -include_lib("opentelemetry_api/include/opentelemetry.hrl").
--include_lib("opentelemetry_api/include/tracer.hrl").
--include_lib("opentelemetry/include/ot_span.hrl").
+-include_lib("opentelemetry_api/include/otel_tracer.hrl").
+-include_lib("opentelemetry/include/otel_span.hrl").
 -include_lib("elli/include/elli.hrl").
 
 all() ->
     [{group, w3c}, {group, b3}].
 
 groups() ->
-    [{w3c, [shuffle], [successful_request, error_response]},
-     {b3, [shuffle], [successful_request, error_response]}].
+    [{w3c, [shuffle], [successful_request_no_parent, successful_request,
+                       error_response, excluded_urls]},
+     {b3, [shuffle], [successful_request_no_parent, successful_request,
+                      error_response, excluded_urls]}].
 
 
 init_per_suite(Config) ->
     ok = application:load(opentelemetry_elli),
     ok = application:load(opentelemetry),
 
+    application:set_env(opentelemetry_elli, excluded_urls, ["/hello/exclude"]),
     application:set_env(opentelemetry_elli, server_name, <<"my-test-elli-server">>),
 
     Config.
@@ -29,18 +32,18 @@ end_per_suite(_Config) ->
     ok.
 
 init_per_group(Propagator, Config) ->
-    application:set_env(opentelemetry, processors, [{ot_batch_processor, #{scheduled_delay_ms => 1}}]),
+    application:set_env(opentelemetry, processors, [{otel_batch_processor, #{scheduled_delay_ms => 1}}]),
     {ok, _} = application:ensure_all_started(opentelemetry),
 
-    {CorrelationsHttpExtractor, CorrelationsHttpInjector} = ot_correlations:get_http_propagators(),
+    {BaggageHttpExtractor, BaggageHttpInjector} = otel_baggage:get_text_map_propagators(),
     {TraceHttpExtractor, TraceHttpInjector} = case Propagator of
-                                                  w3c -> ot_tracer_default:w3c_propagators();
-                                                  b3 -> ot_tracer_default:b3_propagators()
+                                                  w3c -> otel_tracer_default:w3c_propagators();
+                                                  b3 -> otel_tracer_default:b3_propagators()
                                               end,
-    opentelemetry:set_http_extractor([CorrelationsHttpExtractor,
-                                      TraceHttpExtractor]),
-    opentelemetry:set_http_injector([CorrelationsHttpInjector,
-                                     TraceHttpInjector]),
+    opentelemetry:set_text_map_extractors([BaggageHttpExtractor,
+                                           TraceHttpExtractor]),
+    opentelemetry:set_text_map_injectors([BaggageHttpInjector,
+                                          TraceHttpInjector]),
 
     [{propagator, Propagator} | Config].
 
@@ -56,7 +59,7 @@ init_per_testcase(_, Config) ->
                                               {?MODULE, []}]}]}]),
 
     {ok, _} = application:ensure_all_started(opentelemetry),
-    ot_batch_processor:set_exporter(ot_exporter_pid, self()),
+    otel_batch_processor:set_exporter(otel_exporter_pid, self()),
     Config.
 
 end_per_testcase(_, _Config) ->
@@ -64,17 +67,106 @@ end_per_testcase(_, _Config) ->
     _ = application:stop(opentelemetry),
     ok.
 
-successful_request(_Config) ->
-    {ok, {{_, 200, _}, _Headers, Body}} = httpc:request("http://localhost:3000/hello/otel"),
-    ?assertEqual("Hello otel", Body),
+excluded_urls(_Config) ->
+    ?with_span(<<"remote-parent">>, #{},
+               fun(_) ->
+                       RequestHeaders = [{binary_to_list(K), binary_to_list(V)}
+                                         || {K, V} <- otel_propagator:text_map_inject([])],
+                       {ok, {{_, 200, _}, _Headers, Body}} =
+                           httpc:request(get, {"http://localhost:3000/hello/exclude",
+                                               RequestHeaders},
+                                         [], []),
+                       ?assertEqual("Hello exclude", Body)
+               end),
 
     receive
         {span, #span{name=Name,
+                     parent_span_id=Parent}} when Parent =/= undefined ->
+            ?assertEqual(<<"handler-child">>, Name),
+
+            %% then receive the remote parent
+            receive
+                {span, #span{name=ParentName,
+                             span_id=ParentSpanId,
+                             parent_span_id=undefined}} when ParentSpanId =:= Parent ->
+                    ?assertEqual(<<"remote-parent">>, ParentName),
+
+                    %% and guarantee that the mailbox is empty, meaning no elli_middleware span
+                    receive
+                        _ ->
+                            ct:fail(mailbox_not_empty)
+                    after
+                        0 ->
+                            ok
+                    end
+            after
+                5000 ->
+                    ct:fail(timeout)
+            end
+    after
+        5000 ->
+            ct:fail(timeout)
+    end,
+
+    ok.
+
+successful_request(_Config) ->
+    ?with_span(<<"remote-parent">>, #{},
+               fun(_) ->
+                       RequestHeaders = [{binary_to_list(K), binary_to_list(V)}
+                                         || {K, V} <- otel_propagator:text_map_inject([])],
+                       {ok, {{_, 200, _}, _Headers, Body}} =
+                           httpc:request(get, {"http://localhost:3000/hello/otel?a=b#fragment",
+                                               RequestHeaders},
+                                         [], []),
+                       ?assertEqual("Hello otel", Body)
+               end),
+
+    receive
+        {span, #span{name = <<"/hello/{who}">>,
+                     parent_span_id=Parent,
                      attributes=Attributes,
-                     events=_TimeEvents}} ->
-            ?assertEqual(<<"/hello/{who}">>, Name),
+                     events=_TimeEvents}} when Parent =/= undefined ->
             ?assertMatch(#{<<"http.server_name">> := <<"my-test-elli-server">>,
-                           <<"http.target">> := <<"/hello/otel">>,
+                           <<"http.target">> := <<"/hello/otel?a=b">>,
+                           <<"http.host">> := <<"localhost:3000">>,
+                           %% removed until updates to elli allow it
+                           %% <<"http.url">> := <<"http://localhost:3000/hello/otel?a=b">>,
+                           %% scheme is removed until fixed in elli
+                           %% <<"http.scheme">> := <<"http">>,
+                           <<"http.status">> := 200,
+                           %% <<"http.user_agent">> := <<>>,
+                           <<"http.method">> := <<"GET">>,
+                           <<"net.host.port">> := 3000}, maps:from_list(Attributes)),
+
+            %% then receive the remote parent
+            receive
+                {span, #span{name=ParentName,
+                             span_id=ParentSpanId,
+                             parent_span_id=undefined}} when ParentSpanId =:= Parent ->
+                    ?assertEqual(<<"remote-parent">>, ParentName)
+            after
+                5000 ->
+                    ct:fail(timeout)
+            end
+    after
+        5000 ->
+            ct:fail(timeout)
+    end,
+
+    ok.
+
+successful_request_no_parent(_Config) ->
+    {ok, {{_, 200, _}, _Headers, Body}} = httpc:request("http://localhost:3000/hello/otel?a=b#fragment"),
+    ?assertEqual("Hello otel", Body),
+
+    receive
+        {span, #span{name = <<"/hello/{who}">>,
+                     parent_span_id=Parent,
+                     attributes=Attributes,
+                     events=_TimeEvents}} when Parent =:= undefined ->
+            ?assertMatch(#{<<"http.server_name">> := <<"my-test-elli-server">>,
+                           <<"http.target">> := <<"/hello/otel?a=b">>,
                            <<"http.host">> := <<"localhost:3000">>,
                            %% scheme is removed until fixed in elli
                            %% <<"http.scheme">> := <<"http">>,
@@ -84,19 +176,20 @@ successful_request(_Config) ->
                            <<"net.host.port">> := 3000}, maps:from_list(Attributes))
     after
         5000 ->
-            error(timeout)
+            ct:fail(timeout)
     end,
     ok.
 
 error_response(_Config) ->
-    {ok, {{_, 500, _}, _Headers, _Body}} = httpc:request("http://localhost:3000/error"),
+    {ok, {{_, 500, _}, _Headers, _Body}} = httpc:request("http://localhost:3000/error?a=b#fragment"),
 
     receive
         {span, #span{name=Name,
-                     attributes=Attributes}} ->
-            ?assertEqual(<<"/error">>, Name),
+                     parent_span_id=Parent,
+                     attributes=Attributes}} when Parent =:= undefined ->
+            ?assertEqual(<<"HTTP GET">>, Name),
             ?assertMatch(#{<<"http.server_name">> := <<"my-test-elli-server">>,
-                           <<"http.target">> := <<"/error">>,
+                           <<"http.target">> := <<"/error?a=b">>,
                            <<"http.host">> := <<"localhost:3000">>,
                            <<"http.status">> := 500,
                            <<"http.user_agent">> := <<>>,
@@ -104,7 +197,7 @@ error_response(_Config) ->
                            <<"http.method">> := <<"GET">>}, maps:from_list(Attributes))
     after
         5000 ->
-            error(timeout)
+            ct:fail(timeout)
     end,
     ok.
 %%
@@ -112,11 +205,16 @@ error_response(_Config) ->
 handle(Req, Args) ->
     handle(Req#req.path, Req, Args).
 
-handle([<<"hello">>, Who], Req, _Args) ->
-    otel_elli:start_span(<<"/hello/{who}">>, Req),
+handle([<<"hello">>, Who], _Req, _Args) ->
+    ?update_name(<<"/hello/{who}">>),
+
+    ?with_span(<<"handler-child">>, #{},
+               fun(_) ->
+                       ok
+               end),
+
     {ok, [], <<"Hello ", Who/binary>>};
-handle([<<"error">>], Req, _Args) ->
-    otel_elli:start_span(<<"/error">>, Req),
+handle([<<"error">>], _Req, _Args) ->
     throw(all_hell).
 
 handle_event(_Event, _Data, _Args) ->
